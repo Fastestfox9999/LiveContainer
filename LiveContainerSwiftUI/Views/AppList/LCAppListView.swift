@@ -72,6 +72,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State private var isNavigationActive = false
     
     @State private var helpPresent = false
+    @State private var migrationGuidePresent = false
+    @State private var savedInstallers: [URL] = []
     
     @State private var customSortViewPresent = false
     
@@ -224,6 +226,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                                 Button("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus", action: {
                                     Task{ await startInstallFromUrl() }
                                 })
+                                Button("Reinstall from saved IPA", systemImage: "square.and.arrow.down.on.square", action: {
+                                    migrationGuidePresent = true
+                                })
                             } label: {
                                 Label("add", systemImage: "plus")
                             }
@@ -286,6 +291,39 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .sheet(isPresented: $migrationGuidePresent) {
+            NavigationView {
+                List {
+                    Section("Saved installers") {
+                        Text("IPAs imported using the file picker are kept here for reinstalling. Saved games are separate. Copy installers to iCloud Drive before deleting this host app.")
+                        ForEach(savedInstallers, id: \.self) { url in
+                            Button(url.lastPathComponent) {
+                                migrationGuidePresent = false
+                                Task { await installFromUrl(urlStr: url.absoluteString) }
+                            }
+                        }
+                        if savedInstallers.isEmpty {
+                            Text("Import an IPA from Files to save your first installer.")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .onAppear {
+                    let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("Saved Installers", isDirectory: true)
+                    let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+                    savedInstallers = (entries?.allObjects as? [URL] ?? [])
+                        .filter { ["ipa", "tipa"].contains($0.pathExtension.lowercased()) }
+                        .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                }
+                .navigationTitle("Reinstall apps")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { migrationGuidePresent = false }
+                    }
+                }
+            }
+        }
         .alert("lc.common.error".loc, isPresented: $errorShow){
             Button("lc.common.ok".loc, action: {
             })
@@ -573,8 +611,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     func startInstallApp(_ fileUrl:URL) async {
         do {
+            guard !self.installprogressVisible else { return }
             self.installprogressVisible = true
-            try await installIpaFile(fileUrl)
+            defer { self.installprogressVisible = false }
+            let archiveFolder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Saved Installers", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: archiveFolder, withIntermediateDirectories: true)
+            let savedIPA = archiveFolder.appendingPathComponent(fileUrl.lastPathComponent)
+            do {
+                try FileManager.default.copyItem(at: fileUrl, to: savedIPA)
+            } catch {
+                try? FileManager.default.removeItem(at: archiveFolder)
+                throw error
+            }
+            try await installIpaFile(savedIPA)
             try FileManager.default.removeItem(at: fileUrl)
         } catch {
             errorInfo = error.localizedDescription
